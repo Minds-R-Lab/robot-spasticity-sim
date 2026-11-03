@@ -7,17 +7,19 @@ from __future__ import annotations
 
 import numpy as np
 
-from .world import MYO_XML, Q0_MYO
+from .world import MYO2_XML, MYO_XML, Q0_MYO
 
 ELBOW = np.array([0.0061, -0.2904, -0.0123])      # the elbow joint, in the upper-arm frame
 STEEL, MOTOR, CUFF, PAD = [.62, .66, .70, 1], [.16, .19, .23, 1], [.20, .45, .62, .55], [.12, .12, .14, 1]
 REST, ACTIVE = np.array([.86, .66, .62, 1.0]), np.array([.90, .06, .06, 1.0])
 
 
-def build(width=960, height=720):
-    """The render model: the elbow, the robot, a background and lights.  Returns (model, data)."""
+def build(width=960, height=720, two=False, split=False):
+    """The render model: the elbow, the robot, a background and lights.  Returns (model, data).
+    two: the 2-joint arm (shoulder too).  split: the robot's lever is its own body, turning about the elbow axis at the
+    motor's angle, with a spring (the soft cuff) drawn from the lever to the forearm cuff (test 7, the real robot)."""
     import mujoco
-    sp = mujoco.MjSpec.from_file(MYO_XML)
+    sp = mujoco.MjSpec.from_file(MYO2_XML if two else MYO_XML)
     sp.visual.global_.offwidth = width
     sp.visual.global_.offheight = height
     sp.visual.quality.shadowsize = 4096
@@ -47,9 +49,30 @@ def build(width=960, height=720):
     geom(hum, cyl, (0.030, 0.012), (e[0], e[1], e[2] + z + 0.048), STEEL)
     geom(hum, cyl, (0.010, 0.010), (e[0], e[1], e[2] + z + 0.066), [.9, .55, .1, 1])
     # forearm: the lever the motor turns, and its cuff
-    geom(arm, box, (0.014, 0.085, 0.006), (0.0, -0.085, z - 0.025), STEEL)
-    geom(arm, box, (0.012, 0.008, 0.045), (0.0, -0.165, 0.025), STEEL)
+    lev = arm
+    if split:                                          # the elbow joint is at the forearm body's origin
+        lev = arm.add_body()
+        lev.name = "robot_lever"
+        jt = lev.add_joint()
+        jt.name, jt.type = "robot_lever", mujoco.mjtJoint.mjJNT_HINGE
+        jt.axis = list(sp.joint("r_elbow_flex").axis)
+        jt.armature, jt.limited, jt.range = 1.0, mujoco.mjtLimited.mjLIMITED_FALSE, [-1.0, 1.0]
+    if split:                                          # the lever stops short of the cuff; a spring joins them
+        geom(lev, box, (0.014, 0.05, 0.006), (0.0, -0.05, z - 0.025), STEEL)
+        geom(lev, box, (0.010, 0.004, 0.010), (0.0, -0.10, z - 0.025), [.9, .55, .1, 1])
+        geom(arm, box, (0.010, 0.004, 0.016), (0.0, -0.141, z - 0.031), STEEL)
+    else:
+        geom(lev, box, (0.014, 0.085, 0.006), (0.0, -0.085, z - 0.025), STEEL)
+        geom(lev, box, (0.012, 0.008, 0.045), (0.0, -0.165, 0.025), STEEL)
     geom(arm, cyl, (0.038, 0.022), (0.008, -0.165, 0.035), CUFF, (1.5708, 0, 0))
+    if split:                                          # the soft cuff: a spring from the lever to the forearm cuff
+        for body, name, pos in ((lev, "spring_a", (0.0, -0.104, z - 0.025)), (arm, "spring_b", (0.0, -0.137, z - 0.025))):
+            s = body.add_site()
+            s.name, s.pos, s.group = name, list(pos), 4
+        t = sp.add_tendon()
+        t.name = "spring"
+        t.wrap_site("spring_a")
+        t.wrap_site("spring_b")
     # an EMG electrode on the biceps
     geom(hum, box, (0.004, 0.014, 0.012), (0.026, -0.075, 0.0), [.97, .97, .97, 1])
     geom(hum, sph, (0.005,), (0.031, -0.075, 0.0), [.85, .7, .1, 1])
@@ -68,16 +91,23 @@ def build(width=960, height=720):
     m.vis.headlight.ambient = [0.35] * 3
     m.vis.headlight.diffuse = [0.45] * 3
     m.tendon_width[:] = 0.006
+    if split:
+        k = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_TENDON, "spring")
+        m.tendon_width[k] = 0.004
+        m.tendon_rgba[k] = [.95, .6, .1, 1]
     return m, mujoco.MjData(m)
 
 
 class Painter:
     """Poses the render model at an elbow angle q (the study's convention) and colours muscles by activation."""
 
-    def __init__(self, width=960, height=720, azimuth=345.0, elevation=-8.0, distance=0.95):
+    def __init__(self, width=960, height=720, azimuth=345.0, elevation=-8.0, distance=0.95, two=False, split=False):
         import mujoco
         self.mj = mujoco
-        self.m, self.d = build(width, height)
+        self.m, self.d = build(width, height, two, split)
+        self.je = 1 if two else 0                          # the elbow's qpos
+        self.jl = self.je + 1 if split else None           # the robot lever's qpos, relative to the forearm
+        self.spring = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_TENDON, "spring") if split else -1
         self.r = mujoco.Renderer(self.m, height, width)
         self.cam = mujoco.MjvCamera()
         self.cam.azimuth, self.cam.elevation, self.cam.distance = azimuth, elevation, distance
@@ -96,18 +126,36 @@ class Painter:
         mj, m, d = self.mj, self.m, self.d
         pts = []
         for q in (0.05, 0.85):
-            d.qpos[0] = Q0_MYO - q
+            d.qpos[self.je] = Q0_MYO - q
             mj.mj_forward(m, d)
             pts.append(d.site_xpos[mj.mj_name2id(m, mj.mjtObj.mjOBJ_SITE, "wrist")].copy())
         pts += [d.xpos[mj.mj_name2id(m, mj.mjtObj.mjOBJ_BODY, b)].copy() for b in ("r_humerus", "r_ulna_radius_hand")]
         return np.mean(pts, axis=0)
 
-    def frame(self, q, act=None):
-        self.d.qpos[0] = Q0_MYO - q
+    def frame(self, q, act=None, qm=None, shoulder=None):
+        """q: the forearm's angle.  qm: the motor's angle, which places the lever (split scene).  shoulder: its angle (two)."""
+        self.d.qpos[self.je] = Q0_MYO - q
+        if self.je and shoulder is not None:
+            self.d.qpos[0] = shoulder
+        if self.jl is not None:
+            qm = q if qm is None else qm
+            self.d.qpos[self.jl] = q - qm
+            x = float(np.clip(abs(q - qm) / 0.08, 0, 1))         # the spring turns red as it stretches
+            self.m.tendon_rgba[self.spring] = [.95, .6 - .45 * x, .1, 1]
         if act is not None:
             for a, t in self.act_tendon.items():
                 x = float(np.clip(act[a], 0, 1)) ** 0.45
                 self.m.tendon_rgba[t] = (1 - x) * REST + x * ACTIVE
         self.mj.mj_forward(self.m, self.d)
         self.r.update_scene(self.d, self.cam, self.opt)
+        return self.r.render()
+
+    def closeup(self, distance=0.2):
+        """The same pose seen close to the spring (split scene), after frame()."""
+        mj = self.mj
+        c = mj.MjvCamera()
+        c.azimuth, c.elevation, c.distance = self.cam.azimuth, self.cam.elevation, distance
+        a, b = (mj.mj_name2id(self.m, mj.mjtObj.mjOBJ_SITE, s) for s in ("spring_a", "spring_b"))
+        c.lookat[:] = 0.5 * (self.d.site_xpos[a] + self.d.site_xpos[b])
+        self.r.update_scene(self.d, c, self.opt)
         return self.r.render()

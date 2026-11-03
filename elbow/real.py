@@ -99,7 +99,10 @@ class Robot:
         if hasattr(arm, "m"):                                 # the MyoSuite arm: its inertia about the elbow
             import mujoco
             M = np.zeros((arm.m.nv, arm.m.nv))
-            mujoco.mj_fullM(arm.m, M, arm.d.qM)
+            if hasattr(arm.d, "qM"):                          # MuJoCo up to 3.3 (the tests); newer ones changed the call
+                mujoco.mj_fullM(arm.m, M, arm.d.qM)
+            else:
+                mujoco.mj_fullM(arm.m, arm.d, M)
             inertia = float(M[arm.j, arm.j])
         else:
             inertia = arm.p["I"]

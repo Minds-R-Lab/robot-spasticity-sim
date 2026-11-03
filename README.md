@@ -6,9 +6,16 @@ reflex is. We compare the usual 20-stretch method with shorter protocols and wit
 No real patients are involved. Every patient here is simulated, so the true answer is known and each method can be
 scored exactly.
 
-**Video:** [`video/elbow_robot_session.mp4`](video/elbow_robot_session.mp4) (44 s) replays one simulated session. The
-arm is the MyoSuite elbow with six muscles, coloured by activity. The plots show what the robot measures, and the
-captions explain each step.
+**Videos:**
+
+- [`video/elbow_robot_session.mp4`](video/elbow_robot_session.mp4) (44 s) replays one simulated session in the base
+  world. The arm is the MyoSuite elbow with six muscles, coloured by activity. The plots show what the robot measures,
+  and the captions explain each step.
+- [`video/elbow_robot_realistic.mp4`](video/elbow_robot_realistic.mp4) replays one TSRT-4 session in the realistic world
+  of the seventh test, on a patient with **no** reflex. The robot's lever turns at the motor's angle, and a spring stands
+  for the soft cuff between lever and forearm (close-up in the corner). The forearm runs ahead of what the motor encoder
+  says, the EMG jumps at the start of every fast stretch, and the robot calls a reflex that is not there. With the cuff
+  made rigid and everything else the same, the robot calls this patient correctly.
 
 ## The problem
 
@@ -185,7 +192,8 @@ nerve delay. Onset angles alone cannot separate them. A separate measure of dela
 | `scripts/test6_report.py`, `scripts/test7_report.py` | Scoring of the sixth and seventh tests |
 | `scripts/check_t6_repro.py` | Checks that the seventh test's code leaves sixth-test patients unchanged |
 | `scripts/explore_t7_loo.py`, `scripts/explore_t7_loo_report.py` | The exploratory check: the realistic world with one realism off |
-| `scripts/record_session.py`, `scripts/make_video.py` | Record a session and make the video |
+| `scripts/record_session.py`, `scripts/make_video.py` | Record a session and make the first video |
+| `scripts/record_real.py`, `scripts/make_video_real.py` | Record a realistic-world session and make the second video |
 | `tests/` | Unit tests |
 
 ## Running
@@ -201,7 +209,11 @@ python -m pytest -q tests
 python scripts/run2.py --seed 5004 --world myo --method l2a_e --out results/try.jsonl
 python scripts/record_session.py 5004
 python scripts/make_video.py results/video/session_5004.npz video/elbow_robot_session.mp4
+python scripts/record_real.py 5057
+python scripts/make_video_real.py results/video/real_5057.npz video/elbow_robot_realistic.mp4
 ```
+
+The tests ran on MuJoCo 3.3.1. Newer MuJoCo (checked on 3.15) gives the same sessions.
 
 `--world` is `lit` (analytic arm) or `myo` (Hill arm). `--scenario` is `base`, one of the scenarios in
 `elbow/world.py`, or one of `spindle`, `emgreal`, `device`, `thixo`, `position`, `real`. Seeds from 5000 up are development patients; the test seeds are separate.
