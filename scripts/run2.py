@@ -16,6 +16,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from elbow.assessors import METHODS                                         # noqa: E402
 from elbow.device2 import Session2                                          # noqa: E402
+from elbow.real import Robot                                                # noqa: E402
 from elbow.world import (LitArm, MyoArm, k_ref_lit, myo_gravity, sample_lit, sample_myo)    # noqa: E402
 
 
@@ -40,7 +41,13 @@ def run(seed, world, scenario, method, session):
         info["oracle_delay"] = n.delay if v == 1 else v
     day = np.random.default_rng([seed, 8]).standard_normal(3)[session] * n.day_sd
     rng = np.random.default_rng([seed, 2, session, zlib.crc32(method.encode())])
-    ses = Session2(Arm(p, n, rng, day), rng)
+    if p.get("position"):                                 # test 7: this session's shoulder angle, the same for every assessor
+        p["position"]["shoulder"] = float(np.random.default_rng([seed, 9]).uniform(-0.15, 0.15, 3)[session])
+        p["position"]["seed"] = [seed, 12, session]
+    arm = Arm(p, n, rng, day)
+    if p.get("device"):                                   # test 7: the robot as built, with its own sensor noise
+        arm = Robot(arm, p["device"], np.random.default_rng([seed, 11, session, zlib.crc32(method.encode())]))
+    ses = Session2(arm, rng)
     t0 = time.time()
     rep = METHODS[method](ses, info, np.random.default_rng([seed, 3, session]))
     catch = n.lam - n.mu * 3.2

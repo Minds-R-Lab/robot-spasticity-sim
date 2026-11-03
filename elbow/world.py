@@ -1,5 +1,7 @@
 """Patients, set from published ranges (see the README).
 
+Test 7 adds a more realistic world (spindle, emgreal, device, thixo, position, real): see real.py.
+
 Round 6, after a referee's report: EMG now follows the neural drive, not the force-producing activation, so it leads force as real EMG does.  New scenarios
 change the reflex form or attack the assessor's assumptions:
   knee3     the speed factor saturates at 3 rad/s, not 1.
@@ -35,10 +37,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .real import add_realism
+
 PHYS_DT = 0.001
 T_END = 6.0
 EPS_V = 0.02
 MYO_XML = os.path.expanduser("~/myo/myo_sim/myo_sim/models/legacy/elbow/myoelbow_1dof6muscles.xml")
+MYO2_XML = os.path.expanduser("~/myo/myo_sim/myo_sim/models/legacy/elbow/myoelbow_2dof6muscles.xml")   # test 7: + shoulder
 EARLY_R = (float(os.environ.get("ELBOW_ER0", "1.0")), float(os.environ.get("ELBOW_ER1", "2.0")))       # per second of full activation
 EARLY_FLOOR = (float(os.environ.get("ELBOW_EF0", "0.0")), float(os.environ.get("ELBOW_EF1", "0.2")))
 Q0_MYO = 1.8                                  # the stretch starts flexed; assessor angle q = Q0_MYO - elbow flexion
@@ -78,6 +83,9 @@ class Neural:
     f_t: float = 2.0                # force: the force threshold, N m
     react: float = 0.0              # react: the peak of the tensing at 3.2 rad/s, N m
     rt: float = 0.2                 # react: reaction time, s
+    kv: float = 0.0                 # spindle (test 7): velocity term at 1 rad/s, rad
+    kc: float = 0.0                 # spindle (test 7): the muscle's own activity on the spindle, rad at full reflex
+    emg_real: dict | None = None    # emgreal (test 7): recording problems, see real.py
 
 
 def sample_neural(rng, q_s, scenario="base"):
@@ -126,6 +134,12 @@ class Nerves:
         self.buf = deque([(0.0, 0.0)] * k, maxlen=k)
         self.fbuf = deque([0.0] * k, maxlen=k)
         self.efforts = []
+        self.rest = n.emg_rest
+        self.er = None
+        if n.emg_real:                                   # test 7: EMG as recorded
+            from .real import EmgReal
+            self.rest = n.emg_rest * n.emg_real["floor"]
+            self.er = EmgReal(n.emg_real, self.rest, rng)
         t = 0.0
         while n.effort_rate > 0 and t < horizon_s:
             t += rng.exponential(1.0 / n.effort_rate)
@@ -159,6 +173,10 @@ class Nerves:
                 rate = (fo - self.force_old) / dt
                 self.force_old = fo
                 target = h * (n.gain * 0.15 * max(fo - n.f_t, 0.0) + n.gain * 0.02 * max(rate, 0.0))
+            elif n.form == "spindle":                    # test 7: power-law velocity and the muscle's own activity
+                vel = np.sign(qdo) * abs(qdo) ** 0.6
+                e = max(qo + n.kv * vel + n.kc * self.a / max(n.tau_max, 1e-6) - (self.lam + self.jit), 0.0)
+                target = n.gain * h * e
             else:
                 e = max(qo + n.mu * qdo - (self.lam + self.jit), 0.0)
                 if n.form == "flat":
@@ -189,7 +207,10 @@ class Nerves:
         amp = n.emg_gain * (self.drive + g + abs(eff)) / 3.0
         if self.count % 3 == 0:                          # a Gaussian-modulated signal of about 170 Hz band
             self.noise = self.rng.standard_normal()
-        raw = abs((amp + n.emg_rest) * self.noise)
+        if self.er is None:
+            raw = abs((amp + n.emg_rest) * self.noise)
+        else:
+            raw = self.er.raw((amp + self.rest) * self.noise)
         self.env += dt / 0.02 * (raw + n.emg_art * abs(acc) - self.env)
         self.t += dt
         return self.a, g, eff
@@ -202,6 +223,10 @@ class LitArm:
         self.p, self.nv = pp, Nerves(n, rng, day_shift)
         self.q, self.qd, self.acc, self.t = 0.0, 0.0, 0.0, 0.0
         self.max_resist, self.max_over, self.max_speed = 0.0, 0.0, 0.0
+        self.thx = None
+        if pp.get("thixo"):                              # test 7: tissue that stiffens at rest
+            from .real import Thixo
+            self.thx = Thixo(pp["thixo"], self.q)
 
     @property
     def emg(self):
@@ -217,6 +242,8 @@ class LitArm:
         pas = float(self.passive(self.q))
         a, g, eff = self.nv.step(self.q, self.qd, p["q_s"], self.acc, force=pas)
         resist = pas + a + g
+        if self.thx is not None:
+            resist += self.thx.step(self.q, self.qd, self.passive)
         f = u - p["b"] * self.qd - p["F"] * np.tanh(self.qd / EPS_V) - p["G"] * np.cos(self.q + p["phi"]) - resist + eff
         self.acc = f / p["I"]
         self.qd += PHYS_DT * self.acc
@@ -242,6 +269,7 @@ def sample_lit(rng, scenario="base"):
     n = sample_neural(rng, q_s, scenario)
     if contracture:
         n.phenotype += "+contracture"
+    add_realism(rng, p, n, scenario, "lit")
     return p, n
 
 
@@ -256,44 +284,79 @@ class MyoArm:
         self.p = pp
         self.m = make_model(pp)
         self.d = mujoco.MjData(self.m)
-        self.d.qpos[0] = Q0_MYO
+        self.pos = pp.get("position")                    # test 7: the 2-joint arm, the shoulder held at this session's angle
+        self.j = 1 if self.pos else 0                    # the elbow's joint
+        j = self.j
+        self.d.qpos[j] = Q0_MYO
         mujoco.mj_forward(self.m, self.d)
         self.flex = [mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_ACTUATOR, x) for x in self.FLEX]
         self.ext = [mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_ACTUATOR, x) for x in self.EXT]
         self.spin = self.flex[0]                         # the spindle sits in the long head of biceps
         self.l0 = float(self.d.actuator_length[self.spin])
-        self.d.qpos[0] = 0.0
+        self.l0s = self.d.actuator_length[self.flex].copy()
+        self.d.qpos[j] = 0.0
         mujoco.mj_forward(self.m, self.d)
         self.r = (float(self.d.actuator_length[self.spin]) - self.l0) / Q0_MYO      # metres of muscle per radian, on average
+        self.rs = (self.d.actuator_length[self.flex] - self.l0s) / Q0_MYO
         lam_s = 9.0
         if n.reflex:                                     # the threshold, as a length of this muscle
-            self.d.qpos[0] = Q0_MYO - min(n.lam, Q0_MYO)
+            self.d.qpos[j] = Q0_MYO - min(n.lam, Q0_MYO)
             mujoco.mj_forward(self.m, self.d)
-            lam_s = (float(self.d.actuator_length[self.spin]) - self.l0) / self.r
-        self.d.qpos[0] = Q0_MYO
+            lam_s = self.spindle()
+        self.d.qpos[j] = Q0_MYO
+        self.q_end = pp["q_s"]                           # the end of range that safety is measured against
+        if self.pos:                                     # truth is at the reference shoulder angle (0); the session's differs
+            self.sh0 = self.sh = float(self.pos["shoulder"])
+            self.q_end = end_of_range(*myo_curve(pp, self.sh0))
+            self.sh_rng = np.random.default_rng(self.pos["seed"])
+            self.d.qpos[0] = self.sh
         mujoco.mj_forward(self.m, self.d)
+        self.thx = None
+        if pp.get("thixo"):                              # test 7: tissue that stiffens at rest
+            from .real import Thixo
+            self.thx = Thixo(pp["thixo"], self.q)
         self.nv = Nerves(n, rng, day_shift, lam=lam_s)
         # torque per unit flexor activation at the start: turns the nervous system's N m into activation
-        self.t_per_a = max(abs(sum(self.d.actuator_moment.ravel()[a] * self.m.actuator_gainprm[a, 2] for a in self.flex)), 1.0)
+        if self.j == 0:
+            self.t_per_a = max(abs(sum(self.d.actuator_moment.ravel()[a] * self.m.actuator_gainprm[a, 2] for a in self.flex)), 1.0)
+        else:                                            # the 2-joint arm: each actuator's moment about the elbow only
+            mom = np.zeros((self.m.nu, self.m.nv))
+            mujoco.mju_sparse2dense(mom, self.d.actuator_moment, self.d.moment_rownnz, self.d.moment_rowadr, self.d.moment_colind)
+            self.t_per_a = max(abs(sum(mom[a, self.j] * self.m.actuator_gainprm[a, 2] for a in self.flex)), 1.0)
         self.t, self.acc, self.qd_prev = 0.0, 0.0, 0.0
         self.max_resist, self.max_over, self.max_speed = 0.0, 0.0, 0.0
 
     @property
     def q(self):
-        return Q0_MYO - float(self.d.qpos[0])
+        return Q0_MYO - float(self.d.qpos[self.j])
 
     @property
     def qd(self):
-        return -float(self.d.qvel[0])
+        return -float(self.d.qvel[self.j])
 
     @property
     def emg(self):
         return self.nv.env
 
+    def spindle(self):
+        """The spindle's stretch, in radians of elbow: the long head of biceps, or with the 2-joint arm all three flexors."""
+        if not self.pos:
+            return (float(self.d.actuator_length[self.spin]) - self.l0) / self.r
+        return float(np.mean((self.d.actuator_length[self.flex] - self.l0s) / self.rs))
+
+    def spindle_rate(self):
+        if not self.pos:
+            return float(self.d.actuator_velocity[self.spin]) / self.r
+        return float(np.mean(self.d.actuator_velocity[self.flex] / self.rs))
+
     def step(self, u):
+        if self.pos:                                     # the shoulder drifts a little in its rest
+            p = self.pos
+            s = p["drift_sd"] * np.sqrt(2 * PHYS_DT / p["drift_tau"])
+            self.sh += -PHYS_DT / p["drift_tau"] * (self.sh - self.sh0) + s * self.sh_rng.standard_normal()
+            self.d.qpos[0], self.d.qvel[0] = self.sh, 0.0
         a, g, eff = self.nv.step(self.q, self.qd, self.p["q_s"], self.acc,
-                                 (float(self.d.actuator_length[self.spin]) - self.l0) / self.r,
-                                 float(self.d.actuator_velocity[self.spin]) / self.r, force=float(self.p["curve"](self.q)))
+                                 self.spindle(), self.spindle_rate(), force=float(self.p["curve"](self.q)))
         tot = (a + g + max(eff, 0.0)) / self.t_per_a
         c = self.d.ctrl
         c[:] = 0.0
@@ -302,25 +365,32 @@ class MyoArm:
         if eff < 0:
             for k in self.ext:
                 c[k] = -eff / self.t_per_a
-        self.d.qfrc_applied[0] = -u
+        self.d.qfrc_applied[self.j] = -u
+        if self.thx is not None:                         # resistance opposes extension, so it pushes flexion up
+            self.d.qfrc_applied[self.j] += self.thx.step(self.q, self.qd, self.p["curve"])
         self.mj.mj_step(self.m, self.d)
         qd = self.qd
         self.acc = (qd - self.qd_prev) / PHYS_DT
         self.qd_prev = qd
         self.t += PHYS_DT
         self.max_resist = max(self.max_resist, float(self.p["curve"](self.q)) + a + g)
-        self.max_over = max(self.max_over, self.q - self.p["q_s"])
+        self.max_over = max(self.max_over, self.q - self.q_end)
         self.max_speed = max(self.max_speed, abs(qd))
 
 
-def make_model(pp):
+def make_model(pp, two=None):
+    """two: the 2-joint arm (test 7 position).  At the reference shoulder angle it is the same arm, so truth uses the 1-joint one."""
     import mujoco
-    m = mujoco.MjModel.from_xml_path(MYO_XML)
+    two = bool(pp.get("position")) if two is None else two
+    m = mujoco.MjModel.from_xml_path(MYO2_XML if two else MYO_XML)
+    j = 1 if two else 0
+    if two:                                          # the shoulder is held: a huge inertia stops it moving within a step
+        m.dof_armature[0] = 1e4
     m.opt.timestep = PHYS_DT
     m.body_mass[:] *= pp["mass"]
     m.body_inertia[:] *= pp["mass"]
-    m.dof_damping[0] = pp["b"]
-    m.dof_frictionloss[0] = pp["F"]
+    m.dof_damping[j] = pp["b"]
+    m.dof_frictionloss[j] = pp["F"]
     for name in MyoArm.FLEX:
         a = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
         for prm in (m.actuator_gainprm, m.actuator_biasprm):
@@ -329,21 +399,31 @@ def make_model(pp):
     return m
 
 
-def myo_curve(pp):
-    """The tissue truth on this model: the torque to hold each angle with every muscle quiet, gravity aside."""
+def myo_curve(pp, shoulder=None):
+    """The tissue truth on this model: the torque to hold each angle with every muscle quiet, gravity aside.  With a shoulder
+    angle (test 7 position), the same on the 2-joint arm at that angle: used only for the session's own end of range."""
     import mujoco
-    m = make_model(pp)
+    two = shoulder is not None
+    m = make_model(pp, two=two)
     d = mujoco.MjData(m)
+    j = 1 if two else 0
     qs = np.linspace(0.0, Q0_MYO, 201)
     tau = np.zeros(len(qs))
     for i, q in enumerate(qs):
-        d.qpos[0] = Q0_MYO - q
-        d.qvel[0] = 0.0
+        if two:
+            d.qpos[0] = shoulder
+        d.qpos[j] = Q0_MYO - q
+        d.qvel[:] = 0.0
         d.ctrl[:] = 0.0
         d.act[:] = 0.0
         mujoco.mj_forward(m, d)
-        tau[i] = float(d.qfrc_actuator[0]) + float(d.qfrc_passive[0])
+        tau[i] = float(d.qfrc_actuator[j]) + float(d.qfrc_passive[j])
     return qs, tau - tau[0]
+
+
+def end_of_range(qs, tau):
+    up = np.maximum.accumulate(tau)
+    return float(qs[int(np.argmax(up >= T_END)) if (up >= T_END).any() else len(qs) - 1])
 
 
 def sample_myo(rng, scenario="base"):
@@ -360,13 +440,14 @@ def sample_myo(rng, scenario="base"):
     n = sample_neural(rng, pp["q_s"], scenario)
     if contracture:
         n.phenotype += "+contracture"
+    add_realism(rng, pp, n, scenario, "myo")
     return pp, n
 
 
 def myo_gravity(pp):
     """The gravity torque as G cos(q + phi), in assessor angle: what a table of limb masses would give, before its error."""
     import mujoco
-    m = make_model(pp)
+    m = make_model(pp, two=False)
     d = mujoco.MjData(m)
     qs = np.linspace(0.0, 1.6, 9)
     g = []

@@ -59,9 +59,10 @@ Each protocol runs **with EMG** and **with torque only** (no electrodes).
 ### Test design
 
 Before each test, the code and a written protocol (patients, methods, endpoints, what counts as failure) were
-committed. Each test used fresh random seeds. This repository reports the sixth test. Earlier tests found faults in the
-design; one of them compared against a rule that could not remove the EMG motion artefact, which was unfair to the rule,
-and the sixth test fixed it.
+committed. Each test used fresh random seeds. This repository reports the sixth and seventh tests. Earlier tests found
+faults in the design; one of them compared against a rule that could not remove the EMG motion artefact, which was unfair
+to the rule, and the sixth test fixed it. The seventh test keeps every method frozen and makes the simulated world harsher
+(see [A more realistic world](#a-more-realistic-world-seventh-test)).
 
 The sixth test used 500 patients on each arm, with two sessions each on different days, and 200 patients in each of nine
 harder scenarios. Comparisons are paired, with bootstrap 95% intervals. "Equivalent" means the interval stays within
@@ -111,9 +112,55 @@ What this means:
   without one), by tightness that fast stretches reach, and by a reflex driven by muscle force (found in about half of
   patients at best).
 
+## A more realistic world (seventh test)
+
+The sixth test's world is kind: our own reflex law, clean EMG, a rigid robot, tissue without memory, and a patient placed
+the same way every day. The seventh test keeps all four protocols exactly as they were and changes only the simulated
+world, in five ways. Each is tested alone, and `real` turns on all of them.
+
+| Realism | What changes |
+| --- | --- |
+| `spindle` | The reflex reads a muscle spindle whose firing grows with stretch speed to the power 0.6 and with the muscle's own activity (the form of Prochazka and Gorassini 1998). It lies outside the Bayesian model's family. |
+| `emgreal` | EMG as recorded: higher noise floor, 50 Hz mains, electrode pops, drifting electrode gain, three times the motion artefact. |
+| `device` | The cuff and soft tissue are a spring and damper between motor and arm. The robot's axis is off the elbow's, so the arm's angle differs from the motor's. The torque sensor is noisier, drifts and lags. The robot only reads its own encoder and sensor. |
+| `thixo` | Tissue that stiffens at rest and gives with movement. |
+| `position` | Hill arm only: the two-joint MyoSuite arm, with the shoulder at a different angle each day, which changes biceps length. |
+
+500 new patients per arm met the realistic world (two sessions) and the base world (one session), so the two can be
+paired. Each single realism had 200 more patients. 30,000 sessions in all, none crashed. The code is in `elbow/real.py`
+and the scoring in `scripts/test7_report.py`.
+
+**Results in the realistic world (all realisms together), first session, analytic / Hill arm:**
+
+| Protocol, with EMG | Threshold error, base world | Threshold error, realistic world | Specificity, realistic world |
+| --- | --- | --- | --- |
+| TSRT-20 | 0.055 / 0.043 | 0.256 / 0.166 | 0.28 / 0.28 |
+| TSRT-4 | 0.059 / 0.054 | 0.511 / 0.252 | 0.21 / 0.26 |
+| Bayesian | 0.065 / 0.054 | 0.105 / 0.125 | 0.60 / 0.63 |
+| Hybrid | 0.065 / 0.069 | 0.442 / 0.196 | 0.24 / 0.20 |
+
+1. **Every protocol did much worse.** With EMG, the onset rules' threshold error grew three- to ninefold and their
+   specificity fell from above 0.9 to about 0.25: they called many patients without a reflex spastic.
+2. **Most of the sixth test's claims failed.** TSRT-4 was no longer equivalent to TSRT-20 on threshold (worse by 0.08 and
+   0.04 rad). The hybrid lost its stiffness advantage. Without EMG, the Bayesian method's threshold was still more
+   accurate, but it called a reflex in only 13% and 6% of the patients who had one, so it was not useful.
+3. **One realism at a time, the claims mostly held,** except under `device`. A soft, misaligned cuff alone cut the
+   specificity of the onset rules with EMG to 0.48 to 0.76 and removed the hybrid's stiffness advantage, because the
+   robot measures the cuff spring in series with the arm.
+4. **The Bayesian reading with EMG degraded least** (not a pre-specified claim): the smallest threshold error and the
+   highest specificity in the realistic world, at a cost in sensitivity (0.74 / 0.75).
+
+5. **An exploratory check after the test** (not pre-specified; `scripts/explore_t7_loo.py`, 150 new patients per arm)
+   turned off one realism at a time. Turning off the soft cuff restored most of what was lost: TSRT-4's specificity with
+   EMG rose from about 0.25 to 0.87 to 0.95, and the hybrid's stiffness was again better than TSRT-4's. Turning off the
+   spindle restored the sensitivity of the torque-only methods.
+
+The lesson is that how the robot measures the arm may matter more than how many stretches it makes.
+
 ### Limitations
 
-Everything is simulated, and the nervous system in both arms is ours. Simulated EMG is cleaner than real EMG. Some
+Everything is simulated, and the nervous system in both arms is ours. The realism ranges of the seventh test are our
+reading of the literature, not measured on one device. Shoulder angle stood in for forearm rotation. Some
 margins and constants were tuned on development patients with known truth. The simulated TSRT method is far more
 repeatable than the real one, because there is no human rater. A clinical test is the next step.
 
@@ -128,13 +175,16 @@ nerve delay. Onset angles alone cannot separate them. A separate measure of dela
 | Path | What it holds |
 | --- | --- |
 | `elbow/world.py` | Simulated patients: nerves, the analytic arm and the MyoSuite arm, and the nine scenarios |
+| `elbow/real.py` | The seventh test's realisms: spindle, recorded EMG, the soft robot cuff, thixotropy, shoulder position |
 | `elbow/device2.py` | The robot: position control, sensors, torque cut-out |
 | `elbow/model.py` | The joint model the Bayesian method fits, and its posterior |
 | `elbow/assessors.py` | All protocols: `pub_*` (TSRT-20), `short_*` (TSRT-4), `l2a_*` (Bayesian and hybrid); `_e` with EMG, `_t` torque only |
 | `elbow/scene.py` | The 3D render of the arm and robot, for the video |
 | `elbow/patient.py`, `elbow/device.py` | The simpler patient and device of the first three tests |
 | `scripts/run2.py` | One patient, one protocol, one session |
-| `scripts/test6_report.py` | Scoring of the sixth test |
+| `scripts/test6_report.py`, `scripts/test7_report.py` | Scoring of the sixth and seventh tests |
+| `scripts/check_t6_repro.py` | Checks that the seventh test's code leaves sixth-test patients unchanged |
+| `scripts/explore_t7_loo.py`, `scripts/explore_t7_loo_report.py` | The exploratory check: the realistic world with one realism off |
 | `scripts/record_session.py`, `scripts/make_video.py` | Record a session and make the video |
 | `tests/` | Unit tests |
 
@@ -143,7 +193,8 @@ nerve delay. Onset angles alone cannot separate them. A separate measure of dela
 Python 3.11 or later with `numpy`, `scipy`, `matplotlib`, `mujoco` and `imageio-ffmpeg`.
 
 The Hill arm needs the MyoSuite model files (Apache-2.0, `myo_sim` commit 93b0ca8) at
-`~/myo/myo_sim/myo_sim/models/legacy/elbow/`. They are not included here.
+`~/myo/myo_sim/myo_sim/models/legacy/elbow/` (`myoelbow_1dof6muscles.xml`, and `myoelbow_2dof6muscles.xml` for the
+`position` realism). They are not included here.
 
 ```bash
 python -m pytest -q tests
@@ -152,5 +203,5 @@ python scripts/record_session.py 5004
 python scripts/make_video.py results/video/session_5004.npz video/elbow_robot_session.mp4
 ```
 
-`--world` is `lit` (analytic arm) or `myo` (Hill arm). `--scenario` is `base` or one of the scenarios in
-`elbow/world.py`. Seeds from 5000 up are development patients; the test seeds are separate.
+`--world` is `lit` (analytic arm) or `myo` (Hill arm). `--scenario` is `base`, one of the scenarios in
+`elbow/world.py`, or one of `spindle`, `emgreal`, `device`, `thixo`, `position`, `real`. Seeds from 5000 up are development patients; the test seeds are separate.
