@@ -1,0 +1,6 @@
+numpy>=2.0
+scipy>=1.13
+matplotlib>=3.9
+mujoco>=3.2
+imageio-ffmpeg>=0.5
+pytest>=8
