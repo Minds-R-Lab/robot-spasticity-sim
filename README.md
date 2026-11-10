@@ -181,6 +181,7 @@ nerve delay. Onset angles alone cannot separate them. A separate measure of dela
 
 | Path | What it holds |
 | --- | --- |
+| `docs/PATIENT_PARAMETERS.md` | Every simulated patient parameter, its range and its source |
 | `elbow/world.py` | Simulated patients: nerves, the analytic arm and the MyoSuite arm, and the nine scenarios |
 | `elbow/real.py` | The seventh test's realisms: spindle, recorded EMG, the soft robot cuff, thixotropy, shoulder position |
 | `elbow/device2.py` | The robot: position control, sensors, torque cut-out |
